@@ -1,0 +1,209 @@
+=================
+DEVOPS-PROJECT-3:
+=================
+step1: Create one security for pipeline
+Name of SG: cicd-sg
+inbound rules: ssh, http, https, All TCP (0-65535) source: anywhere ip address
+
+step-2: create linux VM with ubuntu as OS and instance type t2.large
+
+vi jenkins.sh
+
+#!/bin/bash
+command=/var/lib/jenkins
+if [ -f $command ]
+then
+   echo "$command is available, let's run it...."
+else
+   echo "$command is not available, installing it...."
+   sudo apt update
+   sudo apt install fontconfig openjdk-17-jre -y
+   java -version
+   sudo wget -O /usr/share/keyrings/jenkins-keyring.asc \
+   https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+  
+  echo deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] \
+  https://pkg.jenkins.io/debian-stable binary/ | sudo tee \
+  /etc/apt/sources.list.d/jenkins.list > /dev/null
+  
+  sudo apt-get update
+  sudo apt-get install jenkins -y
+  sudo systemctl enable jenkins
+  sudo systemctl start jenkins
+  sudo cat /var/lib/jenkins/secrets/initialAdminPassword
+fi
+
+save the file (:wq)
+
+-> give the user execution permissions
+$ chmod u+x jenkins.sh
+$ ./jenkins.sh
+
+step-3: Install docker 
+
+$ sudo apt install docker.io -y
+$ sudo usermod -aG docker jenkins
+$ docker --version
+
+step-4: Install Trivy
+
+sudo apt-get install wget apt-transport-https gnupg lsb-release
+wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
+sudo apt-get update
+sudo apt-get install trivy
+
+
+step-5: Install sonarqube & Nexus
+
+$ docker run -d --name sonar -p 9000:9000 sonarqube:lts-community
+
+$ docker run -d --name nexus -p 8081:8081 sonatype/nexus3
+
+sonar: squ_b74e5a778ca21784838e0802453ca81e582dbaed
+
+=====================================
+Install kubernetes on jenkins server:
+=====================================
+step-1: install AWS CLI, kubectl, eksctl
+
+curl -o kubectl https://amazon-eks.s3.us-west-2.amazonaws.com/1.19.6/2021-01-05/bin/linux/amd64/kubectl
+chmod +x ./kubectl
+sudo mv ./kubectl /usr/local/bin
+kubectl version --short --client
+
+sudo apt install unzip
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+unzip awscliv2.zip
+sudo ./aws/install
+aws --version
+
+curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+sudo mv /tmp/eksctl /usr/local/bin
+eksctl version
+
+step-2: Create IAM role & attach to EKS Management Host
+
+IAM role with admin access:EC2
+
+$ sudo su - jenkins
+
+step-3: Create EKS cluster using eksctl
+
+$ eksctl create cluster --name demo-eks --region ap-south-1 --nodegroup-name my-nodes --node-type t3.small --managed --nodes 2
+
+$ eksctl get cluster --name demo-eks --region ap-south-1
+
+Once EKS cluster is created, kubeconfig file be created under /var/lib/jenkins/.kube/config
+cat /var/lib/jenkins/.kube/config
+
+
+$ eksctl delete cluster --name demo-eks --region ap-south-1
+
+----------------------------------------------------
+plugins:
+
+1. Maven - Maven integration plugin
+
+2. Github - Github integration, pipeline stageview plugins
+
+git-pat: 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
+
+3. kubernetes - K8S pipeline, K8s CLI plugin etc...
+
+4. Sonarqube - Sonarqube scanner plugin
+
+url: http://43.205.231.9:9000/
+
+sonar: squ_4bdcbec8953eb546d9fc980cdac0c703e2613bf0
+
+5. Docker - docker pipeline, docker 
+
+
+----------
+pipeline:
+----------
+pipeline {
+    agent any
+    
+    tools {
+        maven "maven"
+    }
+    environment {
+        DOCKER_IMAGE = "mmbabu/teksit-devops:${BUILD_NUMBER}"
+        KUBE_NAMESPACE = "jenkins"
+        DEPLOYMENT_NAME = "deploymentservice.yaml"
+        KUBE_CONFIG = credentials('k8s-token') // Jenkins credential for Kubeconfig
+    }
+    
+    stages {
+        stage('GIT-CHECKOUT-SCM') {
+            steps {
+                git branch: 'main', changelog: false, poll: false, url: 'https://github.com/mmbabu0705/devops-k8s-project.git'
+            }
+        }
+        stage('COMPILE-THE-SOURCE-CODE') {
+            steps {
+                sh 'mvn compile'
+            }
+        }
+        stage('TEST-THE-SOURCE-CODE') {
+            steps {
+                sh 'mvn test'
+            }
+        }
+        stage('SONARQUBE-ANALYSIS') {
+            steps {
+                withSonarQubeEnv("sonar") {
+                sh 'mvn sonar:sonar'
+                }
+            }
+        }
+        stage('TRIVY-SCAN') {
+            steps {
+               sh "trivy fs --security-checks vuln,config /var/lib/jenkins/workspace/SPRINGBOOT-CICD-JOB"
+            }
+        }
+        stage('PACKAGE-THE-CODE') {
+            steps {
+               sh "mvn package"
+            }
+        }
+        stage('UPALOAD-ARTIFACT-TO-THE-NEXUS-REPO') {
+            steps {
+              nexusArtifactUploader artifacts: [[artifactId: 'devops-integration', classifier: '', file: '/var/lib/jenkins/workspace/SPRINGBOOT-CICD-JOB/target/devops-integration.jar', type: 'jar']], credentialsId: 'nexus_cred', groupId: 'com.javatechie', nexusUrl: '3.110.131.80:8081/', nexusVersion: 'nexus3', protocol: 'http', repository: 'teksit-snapshot-repository', version: '0.0.1-SNAPSHOT'
+            }
+        }
+        stage('DOCKER-BUILD') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker_cred', toolName: 'docker-latest') {
+                        sh "docker build -t teksit-devops ."
+                    }
+                }
+            }
+        }
+        stage('DOCKER-PUSH') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker_cred', toolName: 'docker-latest') {
+                        sh "docker tag teksit-devops mmbabu/teksit-devops:${BUILD_NUMBER}"
+                        sh "docker push mmbabu/teksit-devops:${BUILD_NUMBER}"
+                    }
+                }
+            }
+        }
+        stage('DEPLOY-TO-KUBERNETES') {
+            steps {
+                script {
+                    withKubeConfig([credentialsId: 'k8s-token']) {
+                        sh """
+                        kubectl apply -f deploymentservice.yaml -n ${KUBE_NAMESPACE}
+                        
+                        """
+                    }
+                }
+            }
+        }
+    }
+}
