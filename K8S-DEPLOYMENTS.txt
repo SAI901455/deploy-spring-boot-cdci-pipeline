@@ -1,5 +1,5 @@
 =================
-DEVOPS-PROJECT-3:
+DEVOPS-PROJECT
 =================
 step1: Create one security for pipeline
 Name of SG: cicd-sg
